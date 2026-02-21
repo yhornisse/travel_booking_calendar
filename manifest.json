@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Travel Booking to Calendar",
+  "version": "2.0",
+  "description": "旅行予約情報をGoogleカレンダーにワンクリックで登録します。",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "https://*.trip.com/*",
+    "https://*.booking.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "128": "icon.png"
+  }
+}
