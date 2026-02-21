@@ -23,6 +23,16 @@ const init = () => {
             .trim();
           return cleaned.length > maxLen ? cleaned.slice(0, maxLen).trim() : cleaned;
         };
+        const sanitizeForDetails = (s, maxLen = 300) => {
+          if (!s) return "";
+          const cleaned = String(s)
+            .replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '')
+            .replace(/[\uE000-\uF8FF]/g, '')
+            .replace(/\r\n?/g, '\n');
+          const lines = cleaned.split('\n').map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+          const joined = lines.join('\n');
+          return joined.length > maxLen ? joined.slice(0, maxLen).trim() : joined;
+        };
         const baseUrl = "https://www.google.com/calendar/render?action=TEMPLATE";
         
         const formatTimePart = (t) => {
@@ -48,12 +58,20 @@ const init = () => {
         const safeCategory = sanitizeForCalendar(data.category, 20);
         const safeTitle = sanitizeForCalendar(data.title, 80);
         const safeLocation = sanitizeForCalendar(data.location, 120);
-        const safeSummary = sanitizeForCalendar(data.summary, 300);
+        const safeSummary = sanitizeForDetails(data.summary, 300);
         const safeBookingId = sanitizeForCalendar(data.bookingId, 30);
 
         const detailsLines = [];
         if (safeBookingId) detailsLines.push(`予約番号: ${safeBookingId}`);
-        if (safeSummary && !safeSummary.includes(safeBookingId)) detailsLines.push(`内容: ${safeSummary}`);
+        if (safeSummary && !safeSummary.includes(safeBookingId)) {
+          const summaryLines = safeSummary.split('\n').map((l) => l.trim()).filter(Boolean);
+          if (summaryLines.length <= 1) {
+            detailsLines.push(`内容: ${summaryLines[0] || safeSummary}`);
+          } else {
+            detailsLines.push('内容:');
+            summaryLines.forEach((l) => detailsLines.push(l));
+          }
+        }
         detailsLines.push("※自動抽出データ");
 
         const params = new URLSearchParams({
@@ -250,6 +268,77 @@ function parseTravelBookingData() {
     const clean = bodyText.replace(/\s+/g, ' ').trim();
     const html = document.documentElement ? document.documentElement.innerHTML : "";
 
+    const monthMap = {
+      jan: '01', january: '01',
+      feb: '02', february: '02',
+      mar: '03', march: '03',
+      apr: '04', april: '04',
+      may: '05',
+      jun: '06', june: '06',
+      jul: '07', july: '07',
+      aug: '08', august: '08',
+      sep: '09', sept: '09', september: '09',
+      oct: '10', october: '10',
+      nov: '11', november: '11',
+      dec: '12', december: '12'
+    };
+
+    const parseTime = (t) => {
+      if (!t) return "";
+      const m = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      if (!m) return "";
+      let hh = parseInt(m[1], 10);
+      const mm = m[2];
+      const ap = m[3] ? m[3].toUpperCase() : "";
+      if (ap === "PM" && hh < 12) hh += 12;
+      if (ap === "AM" && hh === 12) hh = 0;
+      return `${String(hh).padStart(2, '0')}:${mm}`;
+    };
+
+    const extractDateTime = (patterns) => {
+      for (const re of patterns) {
+        const m = clean.match(re);
+        if (!m) continue;
+        // Japanese: YYYY年M月D日
+        if (m[1] && m[2] && m[3] && /^\d{4}$/.test(m[1])) {
+          const y = m[1];
+          const mo = String(m[2]).padStart(2, '0');
+          const d = String(m[3]).padStart(2, '0');
+          const time = parseTime(m[4]);
+          return { date: `${y}${mo}${d}`, time };
+        }
+        // English: D Month YYYY
+        if (m[1] && m[2] && m[3] && /^[A-Za-z]+$/.test(m[2])) {
+          const d = String(m[1]).padStart(2, '0');
+          const mo = monthMap[m[2].toLowerCase()] || "";
+          const y = m[3];
+          if (mo) {
+            const time = parseTime(m[4]);
+            return { date: `${y}${mo}${d}`, time };
+          }
+        }
+        // English: Month D, YYYY
+        if (m[1] && m[2] && m[3] && /^[A-Za-z]+$/.test(m[1])) {
+          const mo = monthMap[m[1].toLowerCase()] || "";
+          const d = String(m[2]).padStart(2, '0');
+          const y = m[3];
+          if (mo) {
+            const time = parseTime(m[4]);
+            return { date: `${y}${mo}${d}`, time };
+          }
+        }
+        // ISO: YYYY-MM-DD
+        if (m[1] && m[2] && m[3] && /^\d{4}$/.test(m[1])) {
+          const y = m[1];
+          const mo = String(m[2]).padStart(2, '0');
+          const d = String(m[3]).padStart(2, '0');
+          const time = parseTime(m[4]);
+          return { date: `${y}${mo}${d}`, time };
+        }
+      }
+      return null;
+    };
+
     let hotelName = "";
     let m = html.match(/hotel_name\s*[:=]\s*'([^']+)'/);
     if (m) hotelName = m[1];
@@ -265,15 +354,25 @@ function parseTravelBookingData() {
       }
     }
 
-    const checkinMatch = clean.match(/チェックイン\s*(\d{4})年(\d{1,2})月(\d{1,2})日(?:\\([^\\)]*\\))?\\s*(\d{1,2}:\d{2})?/);
-    const checkoutMatch = clean.match(/チェックアウト\s*(\d{4})年(\d{1,2})月(\d{1,2})日(?:\\([^\\)]*\\))?\\s*(\d{1,2}:\d{2})?/);
-    if (checkinMatch) {
-      res.startDate = `${checkinMatch[1]}${checkinMatch[2].padStart(2, '0')}${checkinMatch[3].padStart(2, '0')}`;
-      res.startTime = checkinMatch[4] || "";
+    const checkinInfo = extractDateTime([
+      /チェックイン\s*(\d{4})年(\d{1,2})月(\d{1,2})日(?:\([^\)]*\))?\s*(\d{1,2}:\d{2})?/,
+      /Check[- ]?in\s*(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)?/i,
+      /Check[- ]?in\s*([A-Za-z]+)\s*(\d{1,2}),?\s*(\d{4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)?/i,
+      /Check[- ]?in\s*(\d{4})-(\d{2})-(\d{2})\s*(\d{1,2}:\d{2})?/i
+    ]);
+    const checkoutInfo = extractDateTime([
+      /チェックアウト\s*(\d{4})年(\d{1,2})月(\d{1,2})日(?:\([^\)]*\))?\s*(\d{1,2}:\d{2})?/,
+      /Check[- ]?out\s*(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)?/i,
+      /Check[- ]?out\s*([A-Za-z]+)\s*(\d{1,2}),?\s*(\d{4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)?/i,
+      /Check[- ]?out\s*(\d{4})-(\d{2})-(\d{2})\s*(\d{1,2}:\d{2})?/i
+    ]);
+    if (checkinInfo) {
+      res.startDate = checkinInfo.date;
+      res.startTime = checkinInfo.time || "";
     }
-    if (checkoutMatch) {
-      res.endDate = `${checkoutMatch[1]}${checkoutMatch[2].padStart(2, '0')}${checkoutMatch[3].padStart(2, '0')}`;
-      res.endTime = checkoutMatch[4] || "";
+    if (checkoutInfo) {
+      res.endDate = checkoutInfo.date;
+      res.endTime = checkoutInfo.time || "";
     } else if (res.startDate) {
       res.endDate = res.startDate;
     }
@@ -291,8 +390,8 @@ function parseTravelBookingData() {
       res.bookingId = bookingId;
       const summaryParts = [];
       if (address) summaryParts.push(`住所: ${address}`);
-      if (checkinMatch) summaryParts.push(`チェックイン: ${checkinMatch[1]}年${checkinMatch[2]}月${checkinMatch[3]}日${checkinMatch[4] ? ` ${checkinMatch[4]}` : ""}`);
-      if (checkoutMatch) summaryParts.push(`チェックアウト: ${checkoutMatch[1]}年${checkoutMatch[2]}月${checkoutMatch[3]}日${checkoutMatch[4] ? ` ${checkoutMatch[4]}` : ""}`);
+      if (checkinInfo) summaryParts.push(`チェックイン: ${res.startDate}${res.startTime ? ` ${res.startTime}` : ""}`);
+      if (checkoutInfo) summaryParts.push(`チェックアウト: ${res.endDate}${res.endTime ? ` ${res.endTime}` : ""}`);
       res.summary = summaryParts.join('\n');
       return res;
     }
